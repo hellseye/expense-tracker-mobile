@@ -31,20 +31,22 @@ Then press `a` to open the Android app, or scan the QR code with Expo Go.
 
 ```
 ledger-mobile/
-├── App.js                  App entry component (registered in index.js)
+├── App.js                  Opens the database, then shows the tab navigator
 ├── app.json                Expo configuration
 ├── index.js                Registers the root component
-├── assets/                 Expo app assets (icon, splash, favicon)
+├── assets/                 App icons (referenced from app.json)
 ├── src/
-│   ├── screens/            Screen components (one folder per screen later)
-│   ├── components/         Reusable UI pieces shared across screens
-│   ├── navigation/         Navigation container and route definitions
-│   ├── services/           Business logic and API/data operations
-│   ├── database/           Local database setup and queries
-│   ├── hooks/              Reusable custom React hooks
-│   ├── context/            Global app state providers
-│   ├── utils/              Pure helper functions
-│   ├── constants/          Shared constants (labels, colors, keys)
+│   ├── navigation/         AppNavigator: the three tabs
+│   ├── screens/            TransactionsScreen, CategoriesScreen, AddExpenseScreen
+│   ├── components/         TabBar, Banner, EmptyState, list rows
+│   ├── controllers/        Validate input, call models, translate errors
+│   ├── services/           App-level operations that span models
+│   ├── models/             SQLite queries, one file per table
+│   ├── database/           Connection, schema, migrations, seeding
+│   ├── hooks/              Data-loading hooks wrapping the controllers
+│   ├── context/            Global app state providers (not used yet)
+│   ├── utils/              Validators and formatting helpers
+│   ├── constants/          Theme colours, category colours/icons, payment methods
 │   └── assets/             Images and icons imported by the JS code
 └── 01_reference/           Desktop project reference (not part of the app)
 ```
@@ -57,15 +59,21 @@ ledger-mobile/
   not know about app state.
 - **`src/navigation/`** — The navigator and its route names. The only place that knows
   which screen is which.
-- **`src/services/`** — Business logic: formatting amounts, filtering/sorting
-  transactions, and later any API calls.
-- **`src/database/`** — Local database configuration and all queries. Screens never
-  write SQL directly.
+- **`src/controllers/`** — The entry point for the rest of the app. They validate
+  input with `utils/validators.js`, call a model (or a service) and turn database
+  constraint errors into readable messages.
+- **`src/services/`** — Application-level operations that need more than one model,
+  such as the first-run setup that creates the profile and its default categories.
+- **`src/models/`** — One file per table. All SQL lives here, parameterised, with no
+  validation and no UI logic.
+- **`src/database/`** — Connection handling, schema, migrations and seeding only.
+  Screens never write SQL directly.
 - **`src/hooks/`** — Custom hooks that wrap database/service calls so screens stay
   declarative.
 - **`src/context/`** — React context providers for global state (e.g. transactions,
   categories).
-- **`src/utils/`** — Pure helpers with no React or app state dependency.
+- **`src/utils/`** — `validators.js` (shared input checks) and pure helpers with no
+  React or app state dependency.
 - **`src/constants/`** — Shared constants so labels, colors and keys live in one place.
 - **`src/assets/`** — Images/icons bundled with the JS. Expo's own icon and splash
   files stay in the root `assets/` folder because `app.json` points at them.
@@ -80,21 +88,83 @@ src/database/
 ├── db.js          Opens the database, turns on foreign keys, runs migrations
 ├── schema.js      Schema version + the CREATE TABLE / CREATE INDEX statements
 ├── migrations.js  Applies the schema and records PRAGMA user_version
-├── seed.js        Default categories, inserted once per user
-└── queries.js     Query functions (user, category, expense, settings)
+└── seed.js        Default categories, inserted once per user
+
+src/models/
+├── categoryModel.js   Category queries
+├── expenseModel.js    Transaction (expense row) queries
+├── userModel.js       Local profile queries
+└── settingModel.js    Key/value setting queries
+
+src/controllers/
+├── categoryController.js
+├── expenseController.js
+├── userController.js
+└── settingController.js
+
+src/services/
+└── databaseService.js
 ```
 
-Call `initDatabase()` once when the app starts, then use the query functions in
-`queries.js`. `getDatabase()` returns the open handle and throws if the database
-has not been initialised yet.
+Call `databaseService.initialize()` once when the app starts: it opens the
+database, applies migrations and makes sure the local profile and its default
+categories exist. `getDatabase()` returns the open handle and throws if the
+database has not been initialised yet.
 
 ### Seeding
 
-`getOrCreateDefaultUser()` calls `seedDefaultCategories(userId)`, which inserts the
-six default categories from `seed.js` only while that user's category list is
-empty. Categories the user created or edited are never touched, so seeding is
-safe to run on every launch. No transactions, expenses or other financial
-records are seeded.
+`databaseService.getOrCreateDefaultUser()` creates the profile through `userModel`
+and then calls `seedDefaultCategories(userId)`, which inserts the six default
+categories from `seed.js` only while that user's category list is empty.
+Categories the user created or edited are never touched, so seeding is safe to
+run on every launch. No transactions, expenses or other financial records are
+seeded.
+
+### How a call flows
+
+```
+UI / hook → controller → model → SQLite
+                 ↘ service (operations that span models) ↗
+```
+
+- **Controller** — validates and trims input with `utils/validators.js`, calls one
+  model function, and converts SQLite constraint errors into readable messages
+  (`UNIQUE` → duplicate name, `FOREIGN KEY` → category in use / not found). It
+  returns the row, the rows, or nothing for a delete.
+- **Model** — runs one parameterised query and returns the database result. It
+  throws `<Entity> not found.` when an update or delete matches no row.
+- **Service** — `databaseService` owns first-run setup: `initialize()` opens the
+  database and calls `getOrCreateDefaultUser()`, which creates the profile
+  (`userModel`) and seeds its default categories (`database/seed.js`).
+
+Operations:
+
+- Categories: list, get by id, create, update (partial), delete. Deleting a
+  category that still has transactions is refused by the foreign key.
+- Transactions: list, get by id, create, update (partial), delete. A row is an
+  `expense`; its `type` is `EXPENSE` or `INCOME`.
+- Profile: `getOrCreateDefaultUser`, get by id, update (partial).
+- Settings: get one, get all, set (upsert), delete.
+
+### App screens
+
+Three tabs switched by `src/navigation/AppNavigator.js` — a small state-based tab
+bar, so no navigation dependency was added. Only the active screen stays
+mounted, so it reads fresh rows from SQLite every time it is opened.
+
+- **Transactions** (`screens/TransactionsScreen.js`) — every transaction, newest
+  first: title, amount, category colour and name, date, and a green `+` for
+  income or a `-` for spending. Empty state when there is nothing yet.
+- **Categories** (`screens/CategoriesScreen.js`) — the add form (name, colour
+  swatches, icon chips) above the list. Delete asks for confirmation; a category
+  used by a transaction is refused by the foreign key and the message is shown.
+- **Add Expense** (`screens/AddExpenseScreen.js`) — title, amount, category
+  chips, payment method chips, date (prefilled with today) and optional notes.
+  Saving goes through `expenseController`; on success the form clears and a
+  success banner appears.
+
+Styling is the Ledger dark theme from `src/constants/theme.js`. Screens reach the
+database through the hooks in `src/hooks/`, and no screen imports a model.
 
 ### Tables
 
@@ -124,7 +194,7 @@ settings; deleting a category that still has expenses is refused (`RESTRICT`).
 
 ## Current stage
 
-Foundation plus the database layer. The Expo project is initialized, the folder
-structure is in place, and SQLite is configured with schema, migrations, query
-functions and one-time default category seeding. No screens, navigation, or
-expense-tracker UI has been added yet.
+MVP with three working features: add an expense, browse transactions, and manage
+categories. The dark UI uses the reference palette, data comes from SQLite
+through controllers and models, and navigation is a three-tab bar. No analytics,
+budgets, filtering or authentication yet.

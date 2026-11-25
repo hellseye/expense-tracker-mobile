@@ -1,5 +1,5 @@
 // Runs a test file with `expo-sqlite` swapped for the Node SQLite stub, so the
-// project's real db.js / migrations.js / queries.js execute unmodified.
+// project's real db.js / migrations.js / models execute unmodified.
 // Usage: node scripts/expo-sqlite-harness.mjs <test-file>
 import { registerHooks } from 'node:module';
 import { extname } from 'node:path';
